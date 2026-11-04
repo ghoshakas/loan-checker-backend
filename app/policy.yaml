@@ -1,0 +1,45 @@
+# Loan screening policy.
+# These thresholds are DATA, not code. Tuning the policy requires no code change.
+# The rule engine (rule_engine.py) reads this file at startup.
+
+version: "1.0"
+currency: "INR"
+
+thresholds:
+  min_credit_score: 650        # R1: hard floor for creditworthiness
+  reject_credit_score: 580     # below this => decisive reject (not reviewable)
+  max_dti: 0.40                # R2: max debt-to-income ratio (existing + new EMI)
+  review_dti: 0.50             # between max_dti and this => review; above => reject
+  min_age: 21                  # R3
+  max_age: 60                  # R3
+  min_employment_years: 2      # R4
+  income_multiple: 5           # R5: requested_amount <= income_multiple * annual_income
+  max_ltv: 0.80                # R6: loan-to-value when collateral is pledged
+
+# Assumptions used to derive the new EMI deterministically (no LLM involved).
+emi_assumptions:
+  annual_interest_rate: 0.11   # 11% p.a. nominal
+  tenure_months: 60            # 5-year amortization assumption for DTI estimation
+
+# Employment statuses treated as "stable" for R4's OR-branch.
+stable_employment_statuses:
+  - "salaried"
+  - "government"
+  - "permanent"
+
+# Fields that MUST be present (non-null) for a decision to be made.
+# A null here forces an INCOMPLETE decision.
+required_fields:
+  - age
+  - requested_amount
+  - annual_income
+  - credit_score
+  - employment_status
+  - employment_years
+  - existing_monthly_debt
+
+# Documents required on file. Missing docs do not reject, but push to REQUIRES_REVIEW.
+required_documents:
+  - id_proof
+  - income_proof
+  - bank_statement
