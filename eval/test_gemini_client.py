@@ -93,3 +93,22 @@ def test_no_fallback_when_same_model(fake):
 ])
 def test_employment_status_normalised(raw, expected):
     assert normalize_employment_status(raw) == expected
+
+
+def test_honours_server_retry_delay(fake, monkeypatch):
+    slept = []
+    monkeypatch.setattr(gc.time, "sleep", lambda s: slept.append(s))
+    err = _ApiError(429)
+    err.args = ("429 RESOURCE_EXHAUSTED {'retryDelay': '12s'}",)
+    m = fake([err, '{"ok": 3}'])
+    assert gc.generate_json("p", dict) == {"ok": 3}
+    assert slept == [13.0] and m.calls == ["primary-model", "primary-model"]
+
+
+def test_too_long_retry_delay_skips_to_fallback(fake, monkeypatch):
+    monkeypatch.setattr(gc.time, "sleep", lambda s: None)
+    err = _ApiError(429)
+    err.args = ("429 {'retryDelay': '300s'}",)
+    m = fake([err, '{"ok": 4}'])
+    assert gc.generate_json("p", dict) == {"ok": 4}
+    assert m.calls == ["primary-model", "fallback-model"]
