@@ -1,35 +1,54 @@
 """The end-to-end screening pipeline, assembled from its stages.
 
-    LoanApplication
-        -> extract_facts        (LLM, only for free text; code validates)
-        -> compute_derived_facts (code)
-        -> evaluate             (code: the decision)
-        -> explain              (LLM, prose only)
-        -> Decision             (validated structured output)
+    LoanApplication (+ uploaded documents)
+        -> build_structured_facts   (code: the form)
+        -> analyze_documents        (LLM reads files; code normalises, merges, cross-checks)
+        -> extract_from_free_text   (LLM, only for notes; code validates)
+        -> compute_derived_facts    (code: EMI, DTI, LTV)
+        -> evaluate                 (code: the RECOMMENDATION)
+        -> explain                  (LLM prose over the fixed recommendation)
+        -> generate_insights        (LLM advisory risk read for the officer)
+        -> Decision                 (validated structured output)
 
-Kept separate from the FastAPI layer so the eval harness and unit tests can call
+The FINAL approve/reject is made by a human officer in the admin panel; this
+pipeline only produces the recommendation and the evidence for it.
+
+Kept separate from the FastAPI layer so the eval harness and unit tests call
 the exact same code path the API uses.
 """
 
 from __future__ import annotations
 
+from typing import Optional, Sequence
+
 from .config import get_policy
+from .document_analyzer import UploadedDocument, analyze_documents
 from .explainer import explain
-from .fact_extractor import extract_facts
+from .fact_extractor import build_structured_facts, extract_from_free_text
+from .risk_analyst import generate_insights
 from .rule_engine import compute_derived_facts, evaluate
 from .schemas import Decision, LoanApplication
 
 
-def screen(application: LoanApplication, with_explanation: bool = True) -> Decision:
+def screen(
+    application: LoanApplication,
+    documents: Sequence[UploadedDocument] = (),
+    with_explanation: bool = True,
+    with_insights: Optional[bool] = None,
+) -> Decision:
     policy = get_policy()
+    if with_insights is None:
+        with_insights = with_explanation
 
-    # 1. Facts: structured input + LLM extraction from free text (code-validated).
-    facts = extract_facts(application)
+    # 1. Facts, in fixed precedence: form > uploaded documents > free-text notes.
+    facts = build_structured_facts(application)
+    findings = analyze_documents(facts, list(documents), policy)
+    extract_from_free_text(facts, application.free_text)
 
     # 2. Derived facts: EMI, DTI, LTV, monthly income (pure math).
     facts = compute_derived_facts(facts, policy)
 
-    # 3. Decision: deterministic rule engine.
+    # 3. Recommendation: deterministic rule engine.
     result = evaluate(facts, policy)
 
     decision = Decision(
@@ -39,10 +58,13 @@ def screen(application: LoanApplication, with_explanation: bool = True) -> Decis
         policy_rules_used=result["policy_rules_used"],
         facts_used=facts,
         explanation="",
+        documents=findings,
     )
 
-    # 4. Explanation: LLM prose over the fixed decision (optional for eval speed).
+    # 4. LLM prose + advisory insights over the FIXED recommendation.
     if with_explanation:
         decision.explanation = explain(decision)
+    if with_insights:
+        decision.insights = generate_insights(decision)
 
     return decision

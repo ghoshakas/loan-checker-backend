@@ -43,3 +43,8 @@ required_documents:
   - id_proof
   - income_proof
   - bank_statement
+
+# Uploaded-document cross-checks (rule D2). A document value that differs from
+# the form (or another document) by more than this fraction => REQUIRES_REVIEW.
+documents:
+  mismatch_tolerance: 0.10

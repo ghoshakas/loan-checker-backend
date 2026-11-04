@@ -93,7 +93,7 @@ def main() -> None:
             continue
 
         app = LoanApplication(**c["input"])
-        decision = screen(app, with_explanation=LLM)
+        decision = screen(app, with_explanation=LLM, with_insights=False)
 
         # Valid structured output: re-validate against the contract.
         try:

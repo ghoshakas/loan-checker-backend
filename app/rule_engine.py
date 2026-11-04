@@ -246,6 +246,23 @@ def evaluate(facts: Facts, policy: dict) -> dict:
         )
         rules_used.append("D1")
         severities.append("review")
+    # D2: uploaded documents must agree with the application (code-detected).
+    if facts.documents_uploaded or facts.document_mismatches:
+        if facts.document_mismatches:
+            reasons.append(
+                Reason(rule_id="D2", description="Documents match application",
+                       passed=False,
+                       detail="Document mismatch: " + "; ".join(facts.document_mismatches) + ".")
+            )
+            severities.append("review")
+        else:
+            reasons.append(
+                Reason(rule_id="D2", description="Documents match application",
+                       passed=True,
+                       detail=f"{len(facts.documents_uploaded)} uploaded document type(s) "
+                              f"consistent with the application.")
+            )
+        rules_used.append("D2")
     for flag in quality_flags:
         reasons.append(
             Reason(rule_id="Q1", description="Data quality check", passed=False,

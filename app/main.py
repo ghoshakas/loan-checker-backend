@@ -1,24 +1,47 @@
-"""FastAPI application exposing the screening pipeline."""
+"""FastAPI application: screening pipeline + applicant and admin panels."""
 
 from __future__ import annotations
 
+import logging
 import os
+from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-load_dotenv()  # load GEMINI_API_KEY from backend/.env if present
+load_dotenv()  # load GEMINI_API_KEY, ADMIN_* etc. from backend/.env if present
 
-from .gemini_client import is_available  # noqa: E402  (after load_dotenv)
+from .auth import seed_admin  # noqa: E402  (after load_dotenv)
+from .db import get_db, init_db  # noqa: E402
+from .gemini_client import is_available  # noqa: E402
 from .pipeline import screen  # noqa: E402
+from .routes import admin_router, applicant_router, auth_router, documents_router  # noqa: E402
 from .schemas import Decision, LoanApplication  # noqa: E402
+
+logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"),
+                    format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    init_db()
+    db = next(get_db())
+    try:
+        seed_admin(db)
+    finally:
+        db.close()
+    yield
+
 
 app = FastAPI(
     title="AI Loan Application Screening Assistant",
-    description="Facts are extracted and validated by code; the decision is made "
-    "by a deterministic rule engine; the LLM only extracts facts and explains.",
-    version="1.0.0",
+    description="Applicants submit applications and documents; the AI reads the "
+    "documents and notes into facts; a deterministic rule engine produces a "
+    "recommendation; the AI adds advisory insights; a human admin makes the "
+    "final decision.",
+    version="2.0.0",
+    lifespan=lifespan,
 )
 
 # CORS: local Vite dev server by default. For a deployed frontend that calls the
@@ -38,6 +61,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(auth_router)
+app.include_router(applicant_router)
+app.include_router(admin_router)
+app.include_router(documents_router)
+
 
 @app.get("/health")
 def health() -> dict:
@@ -48,6 +76,8 @@ def health() -> dict:
     }
 
 
-@app.post("/screen", response_model=Decision)
+@app.post("/screen", response_model=Decision, tags=["sandbox"])
 def screen_endpoint(application: LoanApplication) -> Decision:
+    """Stateless screening (no account, nothing stored). Used by the eval
+    harness and the admin 'Sandbox' tab."""
     return screen(application)

@@ -31,3 +31,6 @@ Thumbs.db
 .vscode/
 .idea/
 *.swp
+
+# Local SQLite DB and uploaded applicant documents (personal data!)
+data/
