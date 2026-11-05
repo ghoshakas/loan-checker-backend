@@ -195,6 +195,13 @@ def test_admin_sees_recommendation_and_decides(client):
                     data={"note": "extra"})
     assert r.status_code == 409
 
+    # ...nor re-decided or re-screened by the officer: the decision is final.
+    r = client.post(f"/admin/applications/{app_id}/decision", headers=_auth(admin),
+                    json={"decision": "rejected", "note": "changed my mind"})
+    assert r.status_code == 409 and "final" in r.json()["detail"]
+    r = client.post(f"/admin/applications/{app_id}/rescreen", headers=_auth(admin))
+    assert r.status_code == 409
+
 
 def test_override_requires_justification(client):
     token = _register(client, "lowscore@example.com")
@@ -245,7 +252,8 @@ def test_admin_stats_and_rescreen(client):
     s = client.get("/admin/stats", headers=_auth(admin)).json()
     assert s["total"] >= 1 and set(s["by_status"]) == {
         "pending_review", "info_requested", "approved", "rejected"}
-    any_id = client.get("/admin/applications", headers=_auth(admin)).json()[0]["id"]
+    any_id = client.get("/admin/applications", params={"status": "pending_review"},
+                        headers=_auth(admin)).json()[0]["id"]
     r = client.post(f"/admin/applications/{any_id}/rescreen", headers=_auth(admin))
     assert r.status_code == 200 and r.json()["events"][-1]["action"] == "screened"
 

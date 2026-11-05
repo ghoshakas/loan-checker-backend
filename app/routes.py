@@ -261,10 +261,19 @@ def get_application(app_id: int, db: DB, _: User = Depends(require_admin)) -> Ad
 @admin_router.post("/applications/{app_id}/rescreen", response_model=AdminApplicationOut)
 def rescreen_application(app_id: int, db: DB, admin: User = Depends(require_admin)) -> AdminApplicationOut:
     row = _get_application(db, app_id)
+    _ensure_open(row)
     run_screening(db, row, actor=admin)
     db.commit()
     db.refresh(row)
     return to_admin_out(row)
+
+
+def _ensure_open(row) -> None:
+    """Approved / rejected applications are closed: the decision is final and
+    the screening it was based on stays frozen as evidence."""
+    if row.status in (STATUS_APPROVED, STATUS_REJECTED):
+        raise HTTPException(status.HTTP_409_CONFLICT,
+                            f"This application is already {row.status}; the decision is final.")
 
 
 _DECISION_TO_STATUS = {
@@ -280,6 +289,7 @@ def decide_application(app_id: int, body: DecisionIn, db: DB,
     """The FINAL human decision. Overriding the system recommendation requires
     a written justification, which is kept in the audit trail."""
     row = _get_application(db, app_id)
+    _ensure_open(row)
     note = (body.note or "").strip() or None
     message = (body.message_to_applicant or "").strip() or None
     rec = row.recommendation
