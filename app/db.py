@@ -27,6 +27,12 @@ INITIAL_REVISION = "0001"
 def database_url() -> str:
     url = os.getenv("DATABASE_URL")
     if url:
+        # Hosts like Railway/Heroku/Neon give "postgres://" or "postgresql://",
+        # which SQLAlchemy maps to psycopg2 (not installed). Use psycopg v3.
+        for prefix in ("postgres://", "postgresql://"):
+            if url.startswith(prefix):
+                url = "postgresql+psycopg://" + url[len(prefix):]
+                break
         return url
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     return f"sqlite:///{DATA_DIR / 'app.db'}"
