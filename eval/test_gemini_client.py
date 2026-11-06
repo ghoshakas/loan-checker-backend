@@ -45,6 +45,8 @@ def fake(monkeypatch):
     def install(script, primary="primary-model", fallback="fallback-model"):
         models = _FakeModels(script)
         monkeypatch.setattr(gc, "is_available", lambda: True)
+        monkeypatch.setattr(gc, "_gemini_ready", lambda: True)
+        monkeypatch.setenv("LLM_PROVIDERS", "gemini")      # Gemini-only behaviour here
         monkeypatch.setattr(gc, "_get_client", lambda: type("C", (), {"models": models})())
         monkeypatch.setattr(gc, "get_gemini_model", lambda: primary)
         monkeypatch.setattr(gc, "_RETRY_DELAYS", (0.0, 0.0))

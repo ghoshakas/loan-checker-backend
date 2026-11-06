@@ -1,4 +1,4 @@
-"""Thin wrapper around the Google Gemini SDK.
+"""Thin wrapper around the Google Gemini SDK, with Meta Llama as a backup.
 
 Centralizes: client creation, model selection, JSON-mode calls, file (PDF/image)
 attachments, and — crucially — graceful degradation when no API key is
@@ -6,6 +6,10 @@ configured. The deterministic pipeline must keep working without an LLM, so
 every call here is best-effort and returns ``None`` on any failure rather than
 raising into the request path. Failures are logged so they are not invisible
 (e.g. a 429 quota error).
+
+Provider order: Gemini (primary model, then GEMINI_FALLBACK_MODEL), then Meta
+Llama (``meta_client``) if META_API_KEY is set. LLM_PROVIDERS (e.g. "meta,gemini"
+or "gemini") changes the order or disables one.
 """
 
 from __future__ import annotations
@@ -16,6 +20,7 @@ import os
 import time
 from typing import Any, Callable, Optional, Sequence
 
+from . import meta_client
 from .config import get_gemini_model
 
 logger = logging.getLogger("loan_screening.gemini")
@@ -35,9 +40,30 @@ except Exception as exc:  # pragma: no cover - import environment dependent
 Attachment = tuple[str, bytes, str]
 
 
-def is_available() -> bool:
-    """True only if the SDK is importable and an API key is set."""
+def _gemini_ready() -> bool:
+    """True only if the Gemini SDK is importable and an API key is set."""
     return genai is not None and bool(os.getenv("GEMINI_API_KEY"))
+
+
+def _providers() -> list[str]:
+    """Configured providers in order, e.g. ["gemini", "meta"]."""
+    raw = os.getenv("LLM_PROVIDERS", "gemini,meta")
+    order = [p.strip().lower() for p in raw.split(",") if p.strip()]
+    return [p for p in order if p in ("gemini", "meta")] or ["gemini", "meta"]
+
+
+def _ready(provider: str) -> bool:
+    return _gemini_ready() if provider == "gemini" else meta_client.is_available()
+
+
+def active_providers() -> list[str]:
+    """Providers that will actually be tried, in order (used by /health)."""
+    return [p for p in _providers() if _ready(p)]
+
+
+def is_available() -> bool:
+    """True if at least one LLM provider (Gemini or Meta Llama) is configured."""
+    return bool(active_providers())
 
 
 def _get_client():
@@ -99,14 +125,50 @@ def generate_json(
     response_schema: type,
     attachments: Sequence[Attachment] = (),
 ) -> Optional[dict]:
-    """Call Gemini in JSON mode and return a parsed dict, or None on failure.
+    """Call the LLM in JSON mode and return a parsed dict, or None on failure.
 
-    `response_schema` is a Pydantic model class; the SDK uses it to constrain
-    the model's output to valid JSON matching that schema. `attachments` are
-    optional files (PDF/images) sent inline with the prompt.
+    `response_schema` is a Pydantic model class; it constrains the model's
+    output to valid JSON matching that schema. `attachments` are optional
+    files (PDF/images) sent inline with the prompt. Providers are tried in
+    order until one returns a result.
     """
     if not is_available():
         return None
+    for provider in _providers():
+        if provider == "gemini" and _gemini_ready():
+            result = _gemini_json(prompt, response_schema, attachments)
+        elif provider == "meta" and meta_client.is_available():
+            result = meta_client.generate_json(prompt, response_schema, attachments)
+        else:
+            continue
+        if result is not None:
+            return result
+        logger.warning("LLM provider %s failed; trying the next one if configured", provider)
+    return None
+
+
+def generate_text(prompt: str) -> Optional[str]:
+    """Plain text generation (used for the explanation step). None on failure."""
+    if not is_available():
+        return None
+    for provider in _providers():
+        if provider == "gemini" and _gemini_ready():
+            result = _gemini_text(prompt)
+        elif provider == "meta" and meta_client.is_available():
+            result = meta_client.generate_text(prompt)
+        else:
+            continue
+        if result is not None:
+            return result
+        logger.warning("LLM provider %s failed; trying the next one if configured", provider)
+    return None
+
+
+def _gemini_json(
+    prompt: str,
+    response_schema: type,
+    attachments: Sequence[Attachment] = (),
+) -> Optional[dict]:
     try:
         client = _get_client()
         contents = _build_contents(prompt, attachments)
@@ -124,10 +186,7 @@ def generate_json(
         return None
 
 
-def generate_text(prompt: str) -> Optional[str]:
-    """Plain text generation (used for the explanation step). None on failure."""
-    if not is_available():
-        return None
+def _gemini_text(prompt: str) -> Optional[str]:
     try:
         client = _get_client()
         config = genai_types.GenerateContentConfig(temperature=0.2)
