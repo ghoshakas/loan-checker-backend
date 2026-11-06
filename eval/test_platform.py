@@ -254,8 +254,28 @@ def test_admin_stats_and_rescreen(client):
         "pending_review", "info_requested", "approved", "rejected"}
     any_id = client.get("/admin/applications", params={"status": "pending_review"},
                         headers=_auth(admin)).json()[0]["id"]
+    before = len(client.get(f"/admin/applications/{any_id}", headers=_auth(admin)).json()["events"])
     r = client.post(f"/admin/applications/{any_id}/rescreen", headers=_auth(admin))
-    assert r.status_code == 200 and r.json()["events"][-1]["action"] == "screened"
+    # Answers at once with the screening queued; it runs after the response.
+    assert r.status_code == 200 and r.json()["screening_in_progress"] is True
+    after = client.get(f"/admin/applications/{any_id}", headers=_auth(admin)).json()
+    assert after["screening_in_progress"] is False
+    assert len(after["events"]) == before + 1 and after["events"][-1]["action"] == "screened"
+
+
+def test_screening_runs_after_the_response(client):
+    """Slow AI calls must not hold the upload request open (proxies 504 it)."""
+    token = _register(client, "async@example.com", "Async User")
+    r = _submit(client, token)
+    assert r.status_code == 201 and r.json()["screening_in_progress"] is True
+    app_id = r.json()["id"]
+    # TestClient runs background tasks before returning, so it's done by now.
+    assert client.get(f"/applications/{app_id}", headers=_auth(token)).json()["screening_in_progress"] is False
+    admin = _admin(client)
+    detail = client.get(f"/admin/applications/{app_id}", headers=_auth(admin)).json()
+    assert detail["screening"] is not None and detail["screened_at"] is not None
+    row = next(x for x in client.get("/admin/applications", headers=_auth(admin)).json() if x["id"] == app_id)
+    assert row["screening_in_progress"] is False and row["recommendation"] == detail["recommendation"]
 
 
 def test_tick_box_claims_are_ignored_documents_must_be_uploaded(client):

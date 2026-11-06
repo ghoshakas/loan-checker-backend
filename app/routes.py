@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import Annotated, Optional
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
 from fastapi.responses import FileResponse
 from pydantic import ValidationError
 from sqlalchemy import func, select
@@ -60,8 +60,9 @@ from .services import (
     check_document_capacity,
     document_path,
     log_event,
+    queue_screening,
     read_uploads,
-    run_screening,
+    screen_in_background,
     store_documents,
     to_admin_out,
     to_admin_summary,
@@ -127,6 +128,7 @@ def _own_application(db: Session, user: User, app_id: int) -> Application:
 @applicant_router.post("", response_model=ApplicantApplicationOut, status_code=201)
 def submit_application(
     db: DB,
+    background: BackgroundTasks,
     application: Annotated[str, Form(description="LoanApplication as a JSON string")],
     files: Files = None,
     document_types: DocTypes = None,
@@ -148,9 +150,10 @@ def submit_application(
     db.flush()
     store_documents(db, row, docs)
     log_event(db, row, user, "submitted", f"{len(docs)} document(s) uploaded")
-    run_screening(db, row, actor=None)
+    queue_screening(row)
     db.commit()
     db.refresh(row)
+    background.add_task(screen_in_background, row.id)   # runs after the response
     return to_applicant_out(row)
 
 
@@ -172,6 +175,7 @@ def my_application(app_id: int, db: DB, user: User = Depends(require_applicant))
 def add_documents(
     app_id: int,
     db: DB,
+    background: BackgroundTasks,
     files: Files = None,
     document_types: DocTypes = None,
     note: Annotated[Optional[str], Form(max_length=2000)] = None,
@@ -199,9 +203,10 @@ def add_documents(
     log_event(db, row, user, "updated",
               f"{len(docs)} document(s) added" + ("; note added" if note and note.strip() else "")
               + ("; returned to review queue" if was_info else ""))
-    run_screening(db, row, actor=None)
+    queue_screening(row)
     db.commit()
     db.refresh(row)
+    background.add_task(screen_in_background, row.id)
     return to_applicant_out(row)
 
 
@@ -259,12 +264,15 @@ def get_application(app_id: int, db: DB, _: User = Depends(require_admin)) -> Ad
 
 
 @admin_router.post("/applications/{app_id}/rescreen", response_model=AdminApplicationOut)
-def rescreen_application(app_id: int, db: DB, admin: User = Depends(require_admin)) -> AdminApplicationOut:
+def rescreen_application(app_id: int, db: DB, background: BackgroundTasks,
+                         admin: User = Depends(require_admin)) -> AdminApplicationOut:
+    """Queue a fresh AI screening; the result appears when it finishes."""
     row = _get_application(db, app_id)
     _ensure_open(row)
-    run_screening(db, row, actor=admin)
+    queue_screening(row)
     db.commit()
     db.refresh(row)
+    background.add_task(screen_in_background, row.id, admin.id)
     return to_admin_out(row)
 
 

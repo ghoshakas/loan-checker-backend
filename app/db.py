@@ -97,11 +97,16 @@ def init_db() -> None:
     run_migrations()
 
 
-def get_db() -> Iterator[Session]:
-    """FastAPI dependency: one session per request."""
+def new_session() -> Session:
+    """A session outside a request (background jobs). Caller closes it."""
     get_engine()
     assert _SessionLocal is not None
-    db = _SessionLocal()
+    return _SessionLocal()
+
+
+def get_db() -> Iterator[Session]:
+    """FastAPI dependency: one session per request."""
+    db = new_session()
     try:
         yield db
     finally:

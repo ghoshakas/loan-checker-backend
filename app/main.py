@@ -16,6 +16,7 @@ from .auth import seed_admin  # noqa: E402  (after load_dotenv)
 from .db import get_db, init_db  # noqa: E402
 from .gemini_client import active_providers, is_available  # noqa: E402
 from .pipeline import screen  # noqa: E402
+from .services import resume_unfinished_screenings  # noqa: E402
 from .routes import admin_router, applicant_router, auth_router, documents_router  # noqa: E402
 from .schemas import Decision, LoanApplication  # noqa: E402
 
@@ -31,6 +32,7 @@ async def lifespan(_: FastAPI):
         seed_admin(db)
     finally:
         db.close()
+    resume_unfinished_screenings()
     yield
 
 

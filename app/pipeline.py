@@ -19,6 +19,7 @@ the exact same code path the API uses.
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional, Sequence
 
 from .config import get_policy
@@ -61,10 +62,14 @@ def screen(
         documents=findings,
     )
 
-    # 4. LLM prose + advisory insights over the FIXED recommendation.
-    if with_explanation:
-        decision.explanation = explain(decision)
-    if with_insights:
-        decision.insights = generate_insights(decision)
+    # 4. LLM prose + advisory insights over the FIXED recommendation. Both only
+    #    read the decision, so run them at the same time (saves one LLM round trip).
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        explanation = pool.submit(explain, decision) if with_explanation else None
+        insights = pool.submit(generate_insights, decision) if with_insights else None
+        if explanation:
+            decision.explanation = explanation.result()
+        if insights:
+            decision.insights = insights.result()
 
     return decision

@@ -70,6 +70,8 @@ class ApplicantApplicationOut(BaseModel):
     final_decision: Optional[str] = None
     applicant_message: Optional[str] = None
     decided_at: Optional[datetime] = None
+    # True while the AI screening runs in the background (it can take minutes).
+    screening_in_progress: bool = False
 
 
 class AdminApplicationSummary(BaseModel):
@@ -83,6 +85,7 @@ class AdminApplicationSummary(BaseModel):
     risk_level: Optional[str] = None
     document_count: int
     created_at: datetime
+    screening_in_progress: bool = False
 
 
 class AdminApplicationOut(ApplicantApplicationOut):

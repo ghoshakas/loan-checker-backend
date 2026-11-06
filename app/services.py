@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import logging
+import threading
 import uuid
 from pathlib import Path
 from typing import Optional
 
 from fastapi import HTTPException, UploadFile, status
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .api_schemas import (
@@ -18,7 +20,7 @@ from .api_schemas import (
     EventOut,
     UserOut,
 )
-from .db import upload_dir, utcnow
+from .db import new_session, upload_dir, utcnow
 from .document_analyzer import (
     MAX_FILE_BYTES,
     MAX_FILES,
@@ -28,7 +30,7 @@ from .document_analyzer import (
     provided_document_types,
     validate_uploads,
 )
-from .models import Application, ApplicationEvent, StoredDocument, User
+from .models import STATUS_INFO, STATUS_PENDING, Application, ApplicationEvent, StoredDocument, User
 from .pipeline import screen
 from .schemas import Decision, LoanApplication
 
@@ -125,6 +127,7 @@ def run_screening(db: Session, app_row: Application, actor: Optional[User]) -> N
         decision = screen(application, docs)
     except Exception:
         logger.exception("Screening failed for application %s", app_row.id)
+        app_row.screened_at = utcnow()   # finished (unsuccessfully): no longer "in progress"
         log_event(db, app_row, actor, "screening_failed",
                   "Automated screening failed; an admin can re-run it.")
         return
@@ -137,6 +140,73 @@ def run_screening(db: Session, app_row: Application, actor: Optional[User]) -> N
     if decision.insights:
         detail += f"; AI risk level: {decision.insights.risk_level.value}"
     log_event(db, app_row, actor, "screened", detail)
+
+
+# --------------------------------------------------------------------------- #
+# Background screening
+# --------------------------------------------------------------------------- #
+# Screening makes several LLM calls and can take minutes, longer than a proxy
+# will wait. So requests only save the data and mark the application as queued
+# (screened_at = None); the screening itself runs after the response is sent.
+_locks: dict[int, threading.Lock] = {}
+_locks_guard = threading.Lock()
+
+
+def _lock_for(app_id: int) -> threading.Lock:
+    with _locks_guard:
+        return _locks.setdefault(app_id, threading.Lock())
+
+
+def queue_screening(app_row: Application) -> None:
+    """Mark the application as waiting for a (re-)screening."""
+    app_row.screened_at = None
+
+
+def screening_in_progress(app_row: Application) -> bool:
+    return app_row.screened_at is None
+
+
+def screen_in_background(app_id: int, actor_id: Optional[int] = None) -> None:
+    """Screen one application in its own DB session. Runs after the response.
+
+    Screenings of the same application run one at a time, so a run started
+    after new documents were added always sees them and finishes last."""
+    with _lock_for(app_id):
+        db = new_session()
+        try:
+            row = db.get(Application, app_id)
+            if row is None:
+                return
+            actor = db.get(User, actor_id) if actor_id else None
+            run_screening(db, row, actor=actor)
+            db.commit()
+        except Exception:
+            logger.exception("Background screening failed for application %s", app_id)
+            db.rollback()
+        finally:
+            db.close()
+
+
+def resume_unfinished_screenings() -> None:
+    """On startup: screen applications whose screening was cut off (e.g. by a
+    restart or deploy), in a background thread."""
+    db = new_session()
+    try:
+        # Only open applications: a decided one keeps the screening it was decided on.
+        ids = list(db.scalars(select(Application.id).where(
+            Application.screened_at.is_(None),
+            Application.status.in_((STATUS_PENDING, STATUS_INFO)))))
+    finally:
+        db.close()
+    if not ids:
+        return
+    logger.info("Resuming screening for %d application(s): %s", len(ids), ids)
+
+    def run() -> None:
+        for app_id in ids:
+            screen_in_background(app_id)
+
+    threading.Thread(target=run, name="resume-screening", daemon=True).start()
 
 
 # --------------------------------------------------------------------------- #
@@ -157,6 +227,7 @@ def to_applicant_out(app_row: Application) -> ApplicantApplicationOut:
         final_decision=app_row.final_decision,
         applicant_message=app_row.applicant_message,
         decided_at=app_row.decided_at,
+        screening_in_progress=screening_in_progress(app_row),
     )
 
 
@@ -173,6 +244,7 @@ def to_admin_summary(app_row: Application) -> AdminApplicationSummary:
         risk_level=app_row.risk_level,
         document_count=len(app_row.documents),
         created_at=app_row.created_at,
+        screening_in_progress=screening_in_progress(app_row),
     )
 
 

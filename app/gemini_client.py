@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 from typing import Any, Callable, Optional, Sequence
 
@@ -85,6 +86,17 @@ def _models() -> list[str]:
     return [primary] + ([fallback] if fallback and fallback != primary else [])
 
 
+# A 429 may say how long to wait ("retryDelay": "12s"). Short waits are
+# honoured; longer ones (e.g. a per-minute quota) skip straight to the next model.
+_MAX_SERVER_DELAY = 30.0
+_RETRY_DELAY_RE = re.compile(r"retryDelay['\"]?\s*:\s*['\"]?(\d+(?:\.\d+)?)s")
+
+
+def _server_retry_delay(exc: Exception) -> Optional[float]:
+    match = _RETRY_DELAY_RE.search(str(exc))
+    return float(match.group(1)) if match else None
+
+
 def _call(make_request: Callable[[str], Any]) -> Any:
     """Run `make_request(model)` with retries on transient errors, then fall
     back to GEMINI_FALLBACK_MODEL. Raises the last error if everything fails."""
@@ -98,10 +110,14 @@ def _call(make_request: Callable[[str], Any]) -> Any:
                 code = getattr(exc, "code", None)
                 if code not in _TRANSIENT_CODES:
                     raise
+                server_delay = _server_retry_delay(exc) if code == 429 else None
+                if server_delay is not None and server_delay > _MAX_SERVER_DELAY:
+                    logger.info("Gemini %s quota resets in %.0fs; not waiting", model, server_delay)
+                    break
                 if attempt < len(_RETRY_DELAYS):
-                    logger.info("Gemini %s returned %s; retrying in %.0fs", model, code,
-                                _RETRY_DELAYS[attempt])
-                    time.sleep(_RETRY_DELAYS[attempt])
+                    delay = server_delay + 1 if server_delay is not None else _RETRY_DELAYS[attempt]
+                    logger.info("Gemini %s returned %s; retrying in %.0fs", model, code, delay)
+                    time.sleep(delay)
         logger.warning("Gemini model %s unavailable (%s); trying fallback if configured",
                        model, getattr(last, "code", "?"))
     assert last is not None
